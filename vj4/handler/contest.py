@@ -25,22 +25,6 @@ from vj4.handler import base
 from vj4.util import pagination
 from vj4.util.misc import filter_language
 
-
-def _parse_pids(pids_str):
-  pid_list = list(map(document.convert_doc_id, pids_str.split(',')))
-  pid_set = set()
-  pids = []
-  for pid in pid_list:
-    if not pid in pid_set:
-      pid_set.add(pid)
-      pids.append(pid)
-  return pids
-
-
-def _format_pids(pids_list):
-  return ','.join([str(pid) for pid in pids_list])
-
-
 def _parse_penalty_rules_yaml(penalty_rules):
   try:
     penalty_rules = yaml.safe_load(penalty_rules)
@@ -163,7 +147,25 @@ class ContestCommonOperationMixin(object):
   async def hide_problems(self, pids):
     for pid in pids:
       await problem.set_hidden(self.domain_id, pid, True)
-
+      
+  async def get_all_problems(self):
+    pdocs = await problem.get_multi(domain_id=self.domain_id, fields=['_id', 'title']).sort([('doc_id', 1)]).to_list()
+    return dict(map(lambda x: (str(x['_id']), x['title']), pdocs))
+  
+  async def parse_pids(self):
+    pid_list = (await self.request.post()).getall('pids', [])
+    pid_list = list(map(document.convert_doc_id, pid_list))
+    pid_set = set()
+    pids = []
+    for pid in pid_list:
+      if not pid in pid_set:
+        pid_set.add(pid)
+        pids.append(pid)
+    return pids
+  
+  @staticmethod
+  def format_pids(pids_list):
+    return [str(pid) for pid in pids_list]
 
 class ContestMixin(ContestStatusMixin, ContestVisibilityMixin, ContestCommonOperationMixin):
   pass
@@ -540,10 +542,11 @@ class ContestCreateHandler(ContestMixin, ContestPageCategoryMixin, base.Handler)
     dt = datetime.datetime.fromtimestamp(ts, self.timezone)
     page_title = self.translate('page.contest_create.contest.title')
     path_components = self.build_path((page_title, None))
+    pdocs = await self.get_all_problems()
     self.render('contest_edit.html',
                 date_text=dt.strftime('%Y-%m-%d'),
                 time_text=dt.strftime('%H:%M'),
-                pids=_format_pids([1000, 1001]),
+                pdocs=pdocs,
                 page_title=page_title, path_components=path_components)
 
   @base.require_priv(builtin.PRIV_USER_PROFILE)
@@ -553,13 +556,14 @@ class ContestCreateHandler(ContestMixin, ContestPageCategoryMixin, base.Handler)
     penalty_since = begin_at + datetime.timedelta(days=7)
     page_title = self.translate('page.contest_create.homework.title')
     path_components = self.build_path((page_title, None))
+    pdocs = await self.get_all_problems()
     self.render('homework_edit.html',
                 date_begin_text=begin_at.strftime('%Y-%m-%d'),
                 time_begin_text='00:00',
                 date_penalty_text=penalty_since.strftime('%Y-%m-%d'),
                 time_penalty_text='23:59',
-                pids=_format_pids([1000, 1001]),
                 extension_days='1',
+                pdocs=pdocs,
                 page_title=page_title, path_components=path_components)
 
   @base.route_argument
@@ -575,7 +579,7 @@ class ContestCreateHandler(ContestMixin, ContestPageCategoryMixin, base.Handler)
   @base.require_perm(builtin.PERM_EDIT_PROBLEM)
   @base.require_perm(builtin.PERM_CREATE_CONTEST)
   @base.route_argument
-  @base.post_argument
+  @base.multi_post_argument
   @base.require_csrf_token
   @base.sanitize
   async def _post_contest(self, *, ctype: str, title: str, content: str, rule: int,
@@ -589,7 +593,7 @@ class ContestCreateHandler(ContestMixin, ContestPageCategoryMixin, base.Handler)
     end_at = begin_at + datetime.timedelta(hours=duration)
     if begin_at >= end_at:
       raise error.ValidationError('duration')
-    pids = _parse_pids(pids)
+    pids = await self.parse_pids()
     await self.verify_problems(pids)
     tid = await contest.add(self.domain_id, document.TYPE_CONTEST, title, content, self.user['_id'],
                             rule, begin_at, end_at, pids)
@@ -600,7 +604,7 @@ class ContestCreateHandler(ContestMixin, ContestPageCategoryMixin, base.Handler)
   @base.require_perm(builtin.PERM_EDIT_PROBLEM)
   @base.require_perm(builtin.PERM_CREATE_HOMEWORK)
   @base.route_argument
-  @base.post_argument
+  @base.multi_post_argument
   @base.require_csrf_token
   @base.sanitize
   async def _post_homework(self, *, ctype: str, title: str, content: str,
@@ -624,7 +628,7 @@ class ContestCreateHandler(ContestMixin, ContestPageCategoryMixin, base.Handler)
       raise error.ValidationError('end_at_date', 'end_at_time')
     if penalty_since > end_at:
       raise error.ValidationError('extension_days')
-    pids = _parse_pids(pids)
+    pids = await self.parse_pids()
     await self.verify_problems(pids)
     tid = await contest.add(self.domain_id, document.TYPE_HOMEWORK, title, content, self.user['_id'],
                             constant.contest.RULE_ASSIGNMENT, begin_at, end_at, pids, show_scoreboard=show_scoreboard,
@@ -657,11 +661,13 @@ class ContestEditHandler(ContestMixin, ContestPageCategoryMixin, base.Handler):
       (self.translate('page.contest_main.contest.title'), self.reverse_url('contest_main', ctype='contest')),
       (tdoc['title'], self.reverse_url('contest_detail', ctype='contest', tid=tdoc['doc_id'])),
       (page_title, None))
+    pdocs = await self.get_all_problems()
     self.render('contest_edit.html', tdoc=tdoc,
                 date_text=dt.strftime('%Y-%m-%d'),
                 time_text=dt.strftime('%H:%M'),
                 duration=duration,
-                pids=_format_pids(tdoc['pids']),
+                pids=self.format_pids(tdoc['pids']),
+                pdocs=pdocs,
                 page_title=page_title, path_components=path_components)
 
   @base.require_priv(builtin.PRIV_USER_PROFILE)
@@ -680,6 +686,7 @@ class ContestEditHandler(ContestMixin, ContestPageCategoryMixin, base.Handler):
       (self.translate('page.contest_main.homework.title'), self.reverse_url('contest_main', ctype='homework')),
       (tdoc['title'], self.reverse_url('contest_detail', ctype='homework', tid=tdoc['doc_id'])),
       (page_title, None))
+    pdocs = await self.get_all_problems()
     self.render('homework_edit.html', tdoc=tdoc,
                 date_begin_text=begin_at.strftime('%Y-%m-%d'),
                 time_begin_text=begin_at.strftime('%H:%M'),
@@ -688,7 +695,8 @@ class ContestEditHandler(ContestMixin, ContestPageCategoryMixin, base.Handler):
                 extension_days=extension_days,
                 limit_rate=limit_rate,
                 penalty_rules=_format_penalty_rules_yaml(tdoc['penalty_rules']),
-                pids=_format_pids(tdoc['pids']),
+                pids=self.format_pids(tdoc['pids']),
+                pdocs=pdocs,
                 page_title=page_title, path_components=path_components)
 
   @base.route_argument
@@ -703,7 +711,7 @@ class ContestEditHandler(ContestMixin, ContestPageCategoryMixin, base.Handler):
   @base.require_priv(builtin.PRIV_USER_PROFILE)
   @base.require_perm(builtin.PERM_EDIT_PROBLEM)
   @base.route_argument
-  @base.post_argument
+  @base.multi_post_argument
   @base.require_csrf_token
   @base.sanitize
   async def _post_contest(self, *, ctype: str, tid: objectid.ObjectId, title: str, content: str, rule: int,
@@ -720,7 +728,7 @@ class ContestEditHandler(ContestMixin, ContestPageCategoryMixin, base.Handler):
     end_at = begin_at + datetime.timedelta(hours=duration)
     if begin_at >= end_at:
       raise error.ValidationError('duration')
-    pids = _parse_pids(pids)
+    pids = await self.parse_pids()
     await self.verify_problems(pids)
     await contest.edit(self.domain_id, document.TYPE_CONTEST, tdoc['doc_id'], title=title, content=content,
                        rule=rule, begin_at=begin_at, end_at=end_at, pids=pids)
@@ -735,7 +743,7 @@ class ContestEditHandler(ContestMixin, ContestPageCategoryMixin, base.Handler):
   @base.require_priv(builtin.PRIV_USER_PROFILE)
   @base.require_perm(builtin.PERM_EDIT_PROBLEM)
   @base.route_argument
-  @base.post_argument
+  @base.multi_post_argument
   @base.require_csrf_token
   @base.sanitize
   async def _post_homework(self, *, ctype: str, tid: objectid.ObjectId, title: str, content: str,
@@ -762,7 +770,8 @@ class ContestEditHandler(ContestMixin, ContestPageCategoryMixin, base.Handler):
       raise error.ValidationError('end_at_date', 'end_at_time')
     if penalty_since > end_at:
       raise error.ValidationError('extension_days')
-    pids = _parse_pids(pids)
+    pids = await self.parse_pids()
+    print(pids)
     await self.verify_problems(pids)
     await contest.edit(self.domain_id, document.TYPE_HOMEWORK, tdoc['doc_id'], title=title, content=content,
                        begin_at=begin_at, end_at=end_at, pids=pids, show_scoreboard=show_scoreboard,
@@ -822,7 +831,8 @@ class ContestEditHandler(ContestMixin, ContestPageCategoryMixin, base.Handler):
   @base.post_argument
   @base.require_csrf_token
   @base.sanitize
-  async def _post_homework(self, *, ctype: str, tid: objectid.ObjectId, judge_category: str, system_test_new: bool = False):
+  async def _post_homework(self, *, ctype: str, tid: objectid.ObjectId, judge_category: str,
+                           system_test_new: bool = False):
     tdoc = await contest.get(self.domain_id, document.TYPE_HOMEWORK, tid)
     if not self.own(tdoc, builtin.PERM_EDIT_HOMEWORK_SELF):
       self.check_perm(builtin.PERM_EDIT_HOMEWORK)

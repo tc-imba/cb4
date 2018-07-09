@@ -24,7 +24,8 @@
               <textarea name="penalty_rules" class="monospace textbox">{% if tdoc %}{{ penalty_rules }}{% else %}{% include 'partials/homework_default_penalty_rules.yaml' %}{% endif %}</textarea>
             </label>
           </div></div>
-          {{ form.form_text(columns=None, label='Problems', name='pids', value=pids) }}
+          {{ form.form_select2(columns=None, label='Problems', name='pids', options=pdocs.items()|default({}),
+                value=pids|default([]), multiple=true) }}
           {{ form.form_textarea(columns=None, label='Content', name='content', value=tdoc['content']|default(''), markdown=True) }}
           {{ form.form_checkbox(label='Show scoreboard', name='show_scoreboard', value=tdoc['show_scoreboard']) }}
           <div class="row"><div class="columns">
